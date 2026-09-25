@@ -6,10 +6,12 @@ from app.database import get_db
 from app.models import Order
 from app.schemas import OrderCreate, OrderResponse
 from app.services import process_inventory, send_order_confirmation, track_order_sale
+from app.settings import settings
+from app.producer import send_order_event
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
-# 1. Create Order (Version A - Synchronous)
+# 1. Create Order
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
     # 1. Save into PostgreSQL
@@ -18,10 +20,16 @@ def create_order(order_in: OrderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_order)
 
-    # 2. Synchronous downstream calls (Version A)
-    process_inventory(order_id=new_order.id, item=new_order.item, quantity=new_order.quantity)
-    send_order_confirmation(order_id=new_order.id, customer_name=new_order.customer_name, item=new_order.item)
-    track_order_sale(order_id=new_order.id, item=new_order.item, price=new_order.price, quantity=new_order.quantity)
+    # 2. Branch: Version A (Sync) vs Version B (Kafka Event-Driven)
+    if settings.USE_KAFKA:
+        # Convert model to JSON-safe dictionary (handles datetime automatically)
+        event_payload = OrderResponse.model_validate(new_order).model_dump(mode="json")
+        send_order_event(event_payload)
+    else:
+        # Version A: Synchronous, blocking downstream calls
+        process_inventory(order_id=new_order.id, item=new_order.item, quantity=new_order.quantity)
+        send_order_confirmation(order_id=new_order.id, customer_name=new_order.customer_name, item=new_order.item)
+        track_order_sale(order_id=new_order.id, item=new_order.item, price=new_order.price, quantity=new_order.quantity)
 
     return new_order
 
